@@ -1,0 +1,8 @@
+{
+    "name": "task_medium_wrong_operator",
+    "difficulty": "medium",
+    "description": "Fix the carry-out logic in the full adder. The cout uses the wrong Boolean operator in its majority gate expression.",
+    "bug_type": "logic",
+    "hint": "The cout expression uses XOR (^) where it should use AND (&). Compare against the standard majority function.",
+    "expected_sim_output": "a b cin | sum cout\n-------------------\n0 0  0  |  0   0\n0 0  1  |  1   0\n0 1  0  |  1   0\n0 1  1  |  0   1\n1 0  0  |  1   0\n1 0  1  |  0   1\n1 1  0  |  0   1\n1 1  1  |  1   1"
+}

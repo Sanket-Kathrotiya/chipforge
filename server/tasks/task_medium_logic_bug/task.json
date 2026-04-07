@@ -1,0 +1,8 @@
+{
+    "name": "task_medium_logic_bug",
+    "difficulty": "medium",
+    "description": "Fix the logic error in the full adder. The sum computation uses the wrong operator — it compiles but produces incorrect simulation output.",
+    "bug_type": "logic",
+    "hint": "The sum output does not match the full adder truth table. Check which Boolean operator is used.",
+    "expected_sim_output": "a b cin | sum cout\n-------------------\n0 0  0  |  0   0\n0 0  1  |  1   0\n0 1  0  |  1   0\n0 1  1  |  0   1\n1 0  0  |  1   0\n1 0  1  |  0   1\n1 1  0  |  0   1\n1 1  1  |  1   1"
+}

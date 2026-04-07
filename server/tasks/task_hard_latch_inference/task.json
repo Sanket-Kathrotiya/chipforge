@@ -1,0 +1,8 @@
+{
+    "name": "task_hard_latch_inference",
+    "difficulty": "hard",
+    "description": "Fix the latch inference issue in the MUX module. The always block is missing an else branch, causing Yosys to infer a latch instead of a pure combinational MUX.",
+    "bug_type": "synthesis",
+    "hint": "Run synthesis and look for latch warnings. The always block needs a complete if/else to avoid latching behavior.",
+    "expected_sim_output": "sel a b | y\n-----------\n 0  0 0 | 0\n 0  0 1 | 1\n 0  1 0 | 0\n 0  1 1 | 1\n 1  0 0 | 0\n 1  0 1 | 0\n 1  1 0 | 1\n 1  1 1 | 1"
+}

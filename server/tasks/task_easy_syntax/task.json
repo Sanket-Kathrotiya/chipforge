@@ -1,0 +1,8 @@
+{
+    "name": "task_easy_syntax",
+    "difficulty": "easy",
+    "description": "Fix the syntax error in the full adder RTL. The sum assignment is incomplete.",
+    "bug_type": "syntax",
+    "hint": "Look at line 13 — the expression is incomplete after the XOR operator.",
+    "expected_sim_output": "a b cin | sum cout\n-------------------\n0 0  0  |  0   0\n0 0  1  |  1   0\n0 1  0  |  1   0\n0 1  1  |  0   1\n1 0  0  |  1   0\n1 0  1  |  0   1\n1 1  0  |  0   1\n1 1  1  |  1   1"
+}

@@ -1,0 +1,8 @@
+{
+    "name": "task_easy_missing_semicolon",
+    "difficulty": "easy",
+    "description": "Fix the missing semicolon in a wire declaration in the full adder RTL.",
+    "bug_type": "syntax",
+    "hint": "A wire declaration is missing its terminating semicolon.",
+    "expected_sim_output": "a b cin | sum cout\n-------------------\n0 0  0  |  0   0\n0 0  1  |  1   0\n0 1  0  |  1   0\n0 1  1  |  0   1\n1 0  0  |  1   0\n1 0  1  |  0   1\n1 1  0  |  0   1\n1 1  1  |  1   1"
+}
