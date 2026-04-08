@@ -45,8 +45,7 @@ import os
 import re
 import textwrap
 from typing import Any, Dict, List, Optional
-
-from mistralai import Mistral
+from openai import OpenAI
 from chipforge import ChipforgeAction, ChipforgeEnv
 
 # ---------------------------------------------------------------------------
@@ -241,10 +240,10 @@ def validate_action(action: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def call_llm(client: Mistral, prompt: str) -> str:
-    """Call the LLM using the Mistral Client."""
+def call_llm(client: OpenAI, prompt: str) -> str:
+    """Call the LLM using the OpenAI Client (MANDATORY)."""
     try:
-        completion = client.chat.complete(
+        completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -252,6 +251,7 @@ def call_llm(client: Mistral, prompt: str) -> str:
             ],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
+            stream=False,
         )
         text = (completion.choices[0].message.content or "").strip()
         return text if text else '{"action_type": "run_simulation"}'
@@ -312,7 +312,7 @@ def compute_score(obs: Any) -> float:
 
 
 async def main() -> None:
-    llm_client = Mistral(api_key=API_KEY)
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     # Connect to environment
     if IMAGE_NAME:

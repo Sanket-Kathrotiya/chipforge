@@ -20,7 +20,7 @@ dependencies = [
     "openenv-core[core]>=0.2.2",
     # Environment-specific dependencies
     # (none needed — Verilator + Yosys are installed in the Docker image)
-    "mistralai>=1.0.0",
+    "openai>=1.0.0",
     "python-dotenv>=1.0.0",
     "websocket-client>=1.9.0",
 ]
