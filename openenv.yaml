@@ -9,21 +9,21 @@ tasks:
   - id: task_easy_syntax
     difficulty: easy
     description: Fix the syntax error in the full adder.
-    grader: graders:chipforge_grader
+    grader: chipforge.graders:chipforge_grader
   - id: task_easy_missing_semicolon
     difficulty: easy
     description: Fix the missing semicolon in a wire declaration in the full adder RTL.
-    grader: graders:chipforge_grader
+    grader: chipforge.graders:chipforge_grader
   - id: task_medium_logic_bug
     difficulty: medium
     description: Fix the logic error in the full adder. The sum computation uses the wrong operator.
-    grader: graders:chipforge_grader
+    grader: chipforge.graders:chipforge_grader
   - id: task_medium_wrong_operator
     difficulty: medium
     description: Fix the carry-out logic in the full adder. The cout uses the wrong Boolean operator.
-    grader: graders:chipforge_grader
+    grader: chipforge.graders:chipforge_grader
   - id: task_hard_latch_inference
     difficulty: hard
     description: Fix the latch inference warning in the sequential logic.
-    grader: graders:chipforge_grader
+    grader: chipforge.graders:chipforge_grader
 

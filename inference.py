@@ -302,16 +302,15 @@ def compute_score(obs: Any) -> float:
 
 
 TASKS = [
-    "task_easy_dff",
     "task_easy_missing_semicolon",
     # "task_easy_mux",
     # "task_easy_syntax",
+    "task_medium_wrong_operator",
+    "task_medium_counter",
     "task_hard_latch_inference",
     # "task_hard_seq_detector",
-    # "task_medium_counter",
     # "task_medium_decoder",
-    "task_medium_logic_bug",
-    "task_medium_wrong_operator"
+    # "task_medium_logic_bug",
 ]
 
 # ---------------------------------------------------------------------------
