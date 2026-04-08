@@ -60,7 +60,7 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 TASK_NAME = os.getenv("CHIPFORGE_TASK", "task_easy_syntax")
 BENCHMARK = os.getenv("CHIPFORGE_BENCHMARK", "chipforge")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")  # Optional: HF Space URL for direct connection
-MAX_STEPS = 20
+MAX_STEPS = 30
 TEMPERATURE = 0.2
 MAX_TOKENS = 1024
 
@@ -307,7 +307,7 @@ TASKS = [
     # "task_easy_mux",
     # "task_easy_syntax",
     "task_hard_latch_inference",
-    "task_hard_seq_detector",
+    # "task_hard_seq_detector",
     # "task_medium_counter",
     # "task_medium_decoder",
     "task_medium_logic_bug",
