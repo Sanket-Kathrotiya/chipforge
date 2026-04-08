@@ -298,7 +298,7 @@ def compute_score(obs: Any) -> float:
     if lint == "clean":
         score += 0.2
 
-    return min(max(score, 0.0), 1.0)
+    return min(max(score, 0.0001), 0.9099)
 
 
 # ---------------------------------------------------------------------------
