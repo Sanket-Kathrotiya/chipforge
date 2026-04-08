@@ -27,15 +27,16 @@ class ChipforgeEnv(
     Example:
         >>> with ChipforgeEnv(base_url="http://localhost:8000") as client:
         ...     result = client.reset()
-        ...     print(result.observation.task_description)
+        ...     print(result.observation.rtl_code)  # RTL is always in observation
         ...
-        ...     # View the buggy RTL
-        ...     result = client.step(ChipforgeAction(action_type="view_rtl"))
-        ...     print(result.observation.rtl_code)
+        ...     # View the testbench code
+        ...     result = client.step(ChipforgeAction(action_type="view_testbench"))
+        ...     print(result.observation.testbench_code)
         ...
-        ...     # Run simulation
+        ...     # Run simulation and view the results
         ...     result = client.step(ChipforgeAction(action_type="run_simulation"))
-        ...     print(result.observation.sim_status)
+        ...     result = client.step(ChipforgeAction(action_type="view_simulation_log"))
+        ...     print(result.observation.log_output)
         ...
         ...     # Edit a line
         ...     result = client.step(ChipforgeAction(
@@ -48,7 +49,8 @@ class ChipforgeEnv(
         >>> client = ChipforgeEnv.from_docker_image("chipforge-env:latest")
         >>> try:
         ...     result = client.reset()
-        ...     result = client.step(ChipforgeAction(action_type="view_rtl"))
+        ...     print(result.observation.rtl_code)  # RTL is always present
+        ...     result = client.step(ChipforgeAction(action_type="run_simulation"))
         ... finally:
         ...     client.close()
     """
@@ -69,9 +71,6 @@ class ChipforgeEnv(
             payload["line_number"] = action.line_number
         if action.new_content is not None:
             payload["new_content"] = action.new_content
-        if action.log_type is not None:
-            payload["log_type"] = action.log_type
-
         return payload
 
     def _parse_result(self, payload: Dict) -> StepResult[ChipforgeObservation]:

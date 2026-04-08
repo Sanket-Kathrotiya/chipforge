@@ -13,10 +13,25 @@ Designed for RL training of LLMs:
   - Action result feedback at every step
 """
 
-from typing import Optional
+from typing import Any, Dict, Literal, Optional
 
 from openenv.core.env_server.types import Action, Observation
-from pydantic import Field
+from pydantic import Field, model_validator
+
+ActionType = Literal[
+    "view_testbench",
+    "view_synthesis_log",
+    "view_lint_log",
+    "view_simulation_log",
+    "run_simulation",
+    "run_synthesis",
+    "run_lint",
+    "edit_line",
+    "append_line",
+    "edit_testbench_line",
+    "append_testbench_line",
+    "submit",
+]
 
 
 class ChipforgeAction(Action):
@@ -24,21 +39,20 @@ class ChipforgeAction(Action):
 
     Supported action_types:
         - view_testbench: View the testbench code
-        - view_logs: View logs from last tool run (specify log_type)
+        - view_synthesis_log: View synthesis log (only if run_synthesis was executed)
+        - view_lint_log: View lint log (only if run_lint was executed)
+        - view_simulation_log: View simulation log (only if run_simulation was executed)
         - run_simulation: Compile and simulate with Verilator
         - run_synthesis: Synthesize with Yosys
         - run_lint: Run Verilator lint checks
         - edit_line: Replace a single line (requires line_number + new_content)
+        - append_line: Append one new RTL line (requires new_content)
+        - edit_testbench_line: Replace a single testbench line (requires line_number + new_content)
+        - append_testbench_line: Append one new testbench line (requires new_content)
         - submit: Submit current RTL as the final solution
     """
 
-    action_type: str = Field(
-        ...,
-        description=(
-            "Type of action: view_testbench, view_logs, "
-            "run_simulation, run_synthesis, run_lint, edit_line, submit"
-        ),
-    )
+    action_type: ActionType = Field(..., description="Type of action to execute")
     line_number: Optional[int] = Field(
         default=None,
         description="Line number to edit (1-indexed). Required for edit_line.",
@@ -49,39 +63,74 @@ class ChipforgeAction(Action):
     )
     log_type: Optional[str] = Field(
         default=None,
-        description="Which log to view: sim, synth, or lint. Used with view_logs.",
+        description="Deprecated. Use view_synthesis_log, view_lint_log, or view_simulation_log instead.",
     )
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "ChipforgeAction":
+        is_edit = self.action_type == "edit_line"
+        is_append = self.action_type == "append_line"
+        is_tb_edit = self.action_type == "edit_testbench_line"
+        is_tb_append = self.action_type == "append_testbench_line"
+        has_line = self.line_number is not None
+        has_content = self.new_content is not None
+
+        if is_edit and (not has_line or not has_content):
+            raise ValueError("edit_line requires both line_number and new_content")
+
+        if is_tb_edit and (not has_line or not has_content):
+            raise ValueError("edit_testbench_line requires both line_number and new_content")
+
+        if (is_append or is_tb_append) and (not has_content or has_line):
+            raise ValueError(
+                "append_line/append_testbench_line require new_content only"
+            )
+
+        if (not is_edit and not is_tb_edit and not is_append and not is_tb_append) and (
+            has_line or has_content
+        ):
+            raise ValueError(
+                "line_number/new_content are only valid for edit_line, append_line, "
+                "edit_testbench_line, append_testbench_line"
+            )
+        return self
 
 
 class ChipforgeObservation(Observation):
     """Observation returned by the ChipForge environment.
 
     Designed as a self-contained Markov state for RL training.
-    The RTL code is ALWAYS included so the agent never needs a
-    separate 'view' action just to see where it is.
+    Always includes the current RTL code.
+    Tool logs are only populated when explicitly requested via:
+        - view_synthesis_log: Shows synthesis logs from last run
+        - view_lint_log: Shows lint logs from last run
+        - view_simulation_log: Shows simulation logs from last run
     """
 
-    # ── Always populated (the Markov state) ──────────────────────────────
+    # ── Always populated (Markov state core) ─────────────────────────────
     rtl_code: str = Field(
         default="",
         description="Current RTL design code with line numbers (always present)",
     )
+    sim_status: Literal["not_run", "pass", "fail", "error"] = Field(
+        default="not_run",
+        description="Latest simulation status for current RTL snapshot",
+    )
+    synth_status: Literal["not_run", "pass", "warning", "error"] = Field(
+        default="not_run",
+        description="Latest synthesis status for current RTL snapshot",
+    )
+    lint_status: Literal["not_run", "clean", "warning", "error"] = Field(
+        default="not_run",
+        description="Latest lint status for current RTL snapshot",
+    )
+    error_summary: str = Field(
+        default="",
+        description="One-line summary of the most relevant diagnostic",
+    )
     task_description: str = Field(
-        default="", description="Description of the current debugging task"
-    )
-
-    # Tool statuses (always present)
-    sim_status: str = Field(
-        default="not_run",
-        description="Simulation status: not_run, pass, fail, error",
-    )
-    synth_status: str = Field(
-        default="not_run",
-        description="Synthesis status: not_run, pass, warning, error",
-    )
-    lint_status: str = Field(
-        default="not_run",
-        description="Lint status: not_run, clean, warning, error",
+        default="",
+        description="Natural language description of the loaded RTL debug task",
     )
 
     # Action feedback (what just happened)
@@ -93,13 +142,17 @@ class ChipforgeObservation(Observation):
         description="Human-readable result of the last action taken",
     )
 
-    # ── Conditionally populated (verbose content from actions) ───────────
+    # ── Conditionally populated (verbose action-specific payload) ─────────
     testbench_code: str = Field(
         default="", description="Testbench code (populated by view_testbench)"
     )
     log_output: str = Field(
         default="",
-        description="Tool output log, truncated to 2000 chars (populated by view_logs or tool runs)",
+        description="Tool output log, truncated to 2000 chars (populated by view_synthesis_log, view_lint_log, view_simulation_log, or tool runs)",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional extra machine-readable fields for clients/prompts",
     )
 
     # ── RL signals ──────────────────────────────────────────────────────

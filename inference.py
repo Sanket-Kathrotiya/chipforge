@@ -32,13 +32,17 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 VALID_ACTIONS = [
-    "view_rtl",
     "view_testbench",
-    "view_logs",
+    "view_synthesis_log",
+    "view_lint_log",
+    "view_simulation_log",
     "run_simulation",
     "run_synthesis",
     "run_lint",
     "edit_line",
+    "append_line",
+    "edit_testbench_line",
+    "append_testbench_line",
     "submit",
 ]
 
@@ -53,32 +57,39 @@ Your goal is to fix buggy Verilog RTL code so it passes simulation, synthesis, a
 
 Available actions (return exactly ONE JSON action per turn):
 
-1. view_rtl          — View the current RTL design code with line numbers
-2. view_testbench    — View the testbench code
-3. view_logs         — View tool output logs. Set log_type to "sim", "synth", or "lint"
-4. run_simulation    — Compile and simulate with Verilator
-5. run_synthesis     — Synthesize with Yosys
-6. run_lint          — Run Verilator lint checks
-7. edit_line         — Replace a single line. Requires line_number (1-indexed) and new_content
-8. submit            — Submit current RTL as final solution (triggers grading)
+1. view_testbench       — View the testbench code
+2. view_synthesis_log   — View synthesis tool logs from last run
+3. view_lint_log        — View lint tool logs from last run
+4. view_simulation_log  — View simulation tool logs from last run
+5. run_simulation       — Compile and simulate with Verilator
+6. run_synthesis        — Synthesize with Yosys
+7. run_lint             — Run Verilator lint checks
+8. edit_line            — Replace a single line. Requires line_number (1-indexed) and new_content
+9. append_line          — Append one RTL line. Requires new_content
+10. edit_testbench_line — Replace a single testbench line. Requires line_number and new_content
+11. append_testbench_line — Append one testbench line. Requires new_content
+12. submit              — Submit current RTL as final solution (triggers grading)
 
 Response format — return ONLY valid JSON:
-{"action_type": "...", "line_number": null, "new_content": null, "log_type": null, "reasoning": "..."}
+{"action_type": "...", "line_number": null, "new_content": null, "reasoning": "..."}
 
 Strategy:
-1. First, view_rtl to see the buggy code
+1. The observation always includes the current RTL code — you don't need to view it separately
 2. Run run_simulation to see compilation/output errors
-3. If there are errors, view_logs with log_type="sim" to read details
+3. If there are errors, use view_simulation_log to read error details
 4. Use edit_line to fix the bug (one line at a time)
-5. Re-run simulation to verify the fix
+5. Use append_line / append_testbench_line if a task starts with missing files
+6. Re-run simulation to verify the fix
 6. Run synthesis and lint to ensure clean results
-7. Submit when everything passes
+7. Use view_synthesis_log and view_lint_log to check for warnings/errors
+9. Submit when everything passes
 
 Rules:
 - Return valid JSON only, no markdown
 - Use null for fields that don't apply to the chosen action
-- Fix bugs methodically — read errors before editing
-- Minimize steps for a higher reward (step penalty of -0.01/step)
+- Fix bugs methodically — read error logs before editing
+- Minimize steps for a higher reward (step penalty of -0.02/step)
+- Optimize cumulative_reward across the full episode, not only the immediate step reward
 """
 
 
@@ -89,20 +100,38 @@ Rules:
 
 def build_prompt(observation: dict[str, Any]) -> str:
     """Build user prompt from the current observation."""
-    parts = [f"Task: {observation.get('task_description', 'Fix the RTL bug.')}"]
+    parts = ["Fix the RTL bug."]
 
-    # Always show status summary
-    parts.append(
-        f"\nStatus: sim={observation.get('sim_status', '?')} "
-        f"synth={observation.get('synth_status', '?')} "
-        f"lint={observation.get('lint_status', '?')}"
-    )
+    # Always show step information
     parts.append(
         f"Step: {observation.get('step_count', '?')}/{observation.get('max_steps', 20)}"
     )
 
     if observation.get("error_summary"):
         parts.append(f"Error: {observation['error_summary']}")
+    if observation.get("last_action"):
+        parts.append(f"Last action: {observation['last_action']}")
+    if observation.get("action_result"):
+        parts.append(f"Action result: {observation['action_result']}")
+
+    status_line = (
+        f"Status: sim={observation.get('sim_status', 'not_run')}, "
+        f"synth={observation.get('synth_status', 'not_run')}, "
+        f"lint={observation.get('lint_status', 'not_run')}"
+    )
+    parts.append(status_line)
+
+    metadata = observation.get("metadata", {}) or {}
+    if "code_dirty" in metadata:
+        parts.append(f"Code dirty since last validation: {metadata.get('code_dirty')}")
+    tool_freshness = metadata.get("tool_freshness", {})
+    if tool_freshness:
+        parts.append(
+            "Tool freshness: "
+            f"sim={tool_freshness.get('simulation')}, "
+            f"synth={tool_freshness.get('synthesis')}, "
+            f"lint={tool_freshness.get('lint')}"
+        )
 
     # Include content fields if populated
     if observation.get("rtl_code"):
@@ -151,18 +180,17 @@ def parse_action(text: str) -> Optional[dict[str, Any]]:
 
 def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize the parsed action."""
-    action_type = action.get("action_type", "view_rtl")
+    action_type = action.get("action_type", "run_simulation")
     if action_type not in VALID_ACTIONS:
-        action_type = "view_rtl"
+        action_type = "run_simulation"
 
     payload: dict[str, Any] = {"action_type": action_type}
 
-    if action_type == "edit_line":
+    if action_type in ("edit_line", "edit_testbench_line"):
         payload["line_number"] = action.get("line_number")
         payload["new_content"] = action.get("new_content")
-
-    if action_type == "view_logs":
-        payload["log_type"] = action.get("log_type", "sim")
+    elif action_type in ("append_line", "append_testbench_line"):
+        payload["new_content"] = action.get("new_content")
 
     return payload
 
@@ -270,11 +298,16 @@ def run_http_episode(args: argparse.Namespace) -> float:
         return json.loads(ws.recv())
 
     # Reset
-    reset_resp = ws_send("reset")
+    reset_payload: dict[str, Any] = {}
+    if args.seed is not None:
+        reset_payload["seed"] = args.seed
+    if args.task_name:
+        reset_payload["task_name"] = args.task_name
+    reset_resp = ws_send("reset", reset_payload if reset_payload else None)
     obs = reset_resp.get("data", {})
     total_reward = 0.0
 
-    print(f"  Task: {obs.get('task_description', '?')}")
+    print(f"  Starting episode...")
     print()
 
     for step in range(args.max_steps):
@@ -290,9 +323,10 @@ def run_http_episode(args: argparse.Namespace) -> float:
         # Parse and validate
         parsed = parse_action(raw_response)
         if parsed is None:
-            parsed = {"action_type": "view_rtl", "reasoning": "Failed to parse LLM response"}
+            parsed = {"action_type": "run_simulation", "reasoning": "Failed to parse LLM response"}
 
         action_dict = validate_action(parsed)
+        
         reasoning = parsed.get("reasoning", "")
 
         # Step via WebSocket
@@ -300,7 +334,8 @@ def run_http_episode(args: argparse.Namespace) -> float:
         obs = step_resp.get("data", {}).get("observation", step_resp.get("data", {}))
         reward = float(step_resp.get("data", {}).get("reward", 0.0))
         done = step_resp.get("data", {}).get("done", False)
-        total_reward = reward
+        total_reward += reward
+        obs_cumulative_reward = obs.get("cumulative_reward")
 
         # Print step header
         print(f"\n  {'─'*56}")
@@ -313,31 +348,17 @@ def run_http_episode(args: argparse.Namespace) -> float:
         if reasoning:
             print(f"    reasoning: {reasoning}")
 
-        # Print full observation/state
+        # Print observation
         print(f"\n  ◀ OBSERVATION:")
-        print(f"    sim_status:       {obs.get('sim_status', '?')}")
-        print(f"    synth_status:     {obs.get('synth_status', '?')}")
-        print(f"    lint_status:      {obs.get('lint_status', '?')}")
-        print(f"    error_summary:    {obs.get('error_summary', '')}")
-        print(f"    step_count:       {obs.get('step_count', '?')}/{obs.get('max_steps', 20)}")
-        print(f"    reward:           {reward:+.3f}")
-        print(f"    total_reward:     {total_reward:+.3f}")
-        print(f"    done:             {done}")
+        print(f"    {json.dumps(obs, indent=4)}")
 
-        if obs.get("rtl_code"):
-            print(f"\n    --- RTL Code ---")
-            print(f"    {obs['rtl_code'][:500]}")
-
-        if obs.get("testbench_code"):
-            print(f"\n    --- Testbench (first 300 chars) ---")
-            print(f"    {obs['testbench_code'][:300]}")
-
-        if obs.get("log_output"):
-            print(f"\n    --- Log Output (first 500 chars) ---")
-            print(f"    {obs['log_output'][:500]}")
+        print(
+            f"\n  Reward: step={reward:+.3f}  episode_return={total_reward:+.3f}  "
+            f"obs_cumulative={obs_cumulative_reward}"
+        )
 
         if done:
-            print(f"\n  🏁 EPISODE DONE — Final reward: {total_reward:+.3f}")
+            print(f"\n  🏁 EPISODE DONE — Episode return: {total_reward:+.3f}")
             break
 
         # 10 second delay between steps
@@ -345,7 +366,7 @@ def run_http_episode(args: argparse.Namespace) -> float:
         time.sleep(10)
 
     ws.close()
-    print(f"\n  Final reward: {total_reward:+.3f}")
+    print(f"\n  Final episode return: {total_reward:+.3f}")
     return total_reward
 
 
@@ -361,23 +382,30 @@ def run_local_episode(args: argparse.Namespace) -> float:
     client = make_mistral_client(args.api_key)
     env = ChipforgeEnvironment()
 
-    obs = env.reset(seed=args.seed)
+    reset_kwargs: dict[str, Any] = {}
+    if args.seed is not None:
+        reset_kwargs["seed"] = args.seed
+    if args.task_name:
+        reset_kwargs["task_name"] = args.task_name
+    obs = env.reset(**reset_kwargs)
     total_reward = 0.0
 
-    print(f"  Task: {obs.task_description}")
+    print(f"  Starting episode...")
     print()
 
     for step in range(args.max_steps):
         # Build observation dict for prompt
         obs_dict = {
-            "task_description": obs.task_description,
             "rtl_code": obs.rtl_code,
             "testbench_code": obs.testbench_code,
             "log_output": obs.log_output,
             "sim_status": obs.sim_status,
             "synth_status": obs.synth_status,
             "lint_status": obs.lint_status,
+            "last_action": obs.last_action,
+            "action_result": obs.action_result,
             "error_summary": obs.error_summary,
+            "metadata": obs.metadata,
             "step_count": obs.step_count,
             "max_steps": obs.max_steps,
         }
@@ -392,14 +420,15 @@ def run_local_episode(args: argparse.Namespace) -> float:
 
         parsed = parse_action(raw_response)
         if parsed is None:
-            parsed = {"action_type": "view_rtl", "reasoning": "Failed to parse"}
+            parsed = {"action_type": "run_simulation", "reasoning": "Failed to parse"}
 
         action_dict = validate_action(parsed)
         reasoning = parsed.get("reasoning", "")
 
         action = ChipforgeAction(**action_dict)
         obs = env.step(action)
-        total_reward = obs.reward
+        step_reward = float(obs.reward or 0.0)
+        total_reward += step_reward
 
         action_str = action_dict["action_type"]
         if action_dict["action_type"] == "edit_line":
@@ -407,20 +436,16 @@ def run_local_episode(args: argparse.Namespace) -> float:
 
         print(
             f"  step={step + 1:02d}  action={action_str:25s}  "
-            f"sim={obs.sim_status:8s}  "
-            f"synth={obs.synth_status:8s}  "
-            f"reward={obs.reward:+.3f}  done={obs.done}"
+            f"reward={step_reward:+.3f}  return={total_reward:+.3f}  done={obs.done}"
         )
         if reasoning:
             print(f"          reasoning: {reasoning[:80]}")
-        if obs.error_summary:
-            print(f"          error: {obs.error_summary[:80]}")
 
         if obs.done:
             break
 
     env.close()
-    print(f"\n  Final reward: {total_reward:+.3f}")
+    print(f"\n  Final episode return: {total_reward:+.3f}")
     return total_reward
 
 
@@ -440,6 +465,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--task-name",
+        default=None,
+        help="Optional task directory name under server/tasks (e.g. easy/03_write_testbench_from_prompt).",
+    )
     parser.add_argument("--temperature", type=float, default=0.2)
     return parser
 
