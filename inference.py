@@ -48,7 +48,8 @@ from typing import Any, Dict, List, Optional
 
 import openai
 import websocket
-
+from dotenv import load_dotenv
+load_dotenv()
 # ---------------------------------------------------------------------------
 # Environment configuration
 # ---------------------------------------------------------------------------

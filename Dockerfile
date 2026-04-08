@@ -106,4 +106,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Run the FastAPI server
 # Use the package-qualified module path so relative imports resolve correctly.
-CMD ["sh", "-c", "cd /app/env && uvicorn chipforge.server.app:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port 8000"]
