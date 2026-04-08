@@ -5,6 +5,89 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 
+action_space:
+  type: discrete
+  fields:
+    - name: action_type
+      type: string
+      values: [view_design, view_testbench, view_synthesis_log, view_lint_log, view_simulation_log, run_simulation, run_synthesis, run_lint, edit_line, append_line, insert_lines, replace_lines, write_file, submit]
+      description: "The action to perform on the RTL environment"
+    - name: target
+      type: string
+      values: [design, testbench]
+      required: false
+      description: "The target file for editing actions"
+    - name: line_number
+      type: integer
+      required: false
+      description: "The starting line number for edits"
+    - name: end_line_number
+      type: integer
+      required: false
+      description: "The ending line number for replace_lines"
+    - name: new_content
+      type: string
+      required: false
+      description: "The new code content to insert or write"
+    - name: reasoning
+      type: string
+      required: false
+      description: "Reasoning for the action taken by the LLM"
+
+observation_space:
+  fields:
+    - name: task_description
+      type: string
+      description: "Description of the current RTL bug to fix"
+    - name: step_count
+      type: integer
+      description: "Current step number"
+    - name: max_steps
+      type: integer
+      description: "Total steps allowed in the episode"
+    - name: error_summary
+      type: string
+      description: "Summary of errors from the last action"
+    - name: last_action
+      type: string
+      description: "The last action taken"
+    - name: action_result
+      type: string
+      description: "Result of the last action"
+    - name: sim_status
+      type: string
+      description: "Simulation pass/fail status"
+    - name: synth_status
+      type: string
+      description: "Synthesis pass/fail status"
+    - name: lint_status
+      type: string
+      description: "Lint clean/warnings status"
+    - name: design_code
+      type: string
+      description: "Current Verilog design text"
+    - name: testbench_code
+      type: string
+      description: "Current Verilog testbench code text"
+    - name: log_output
+      type: string
+      description: "Log output from the last tool run"
+
+reward:
+  min: 0.01
+  max: 0.99
+  description: >
+    Rewards scale based on simulation passes (+0.1 for running, +0.3 for pass),
+    synthesis passes (+0.3), and lint passes (+0.2). Step penalties (-0.02) are
+    applied. Total normalized strictly into (0, 1).
+
+difficulties:
+  - easy
+  - medium
+  - hard
+
+max_steps: 30
+
 tasks:
   - id: task_easy_missing_semicolon
     difficulty: easy
