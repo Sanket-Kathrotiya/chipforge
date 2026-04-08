@@ -5,7 +5,7 @@ Constants used across the ChipForge server environment.
 import os
 from pathlib import Path
 
-MAX_STEPS = 20
+MAX_STEPS = 30  # max steps per episode
 LOG_TRUNCATE = 2000  # max chars in observation logs
 TOOL_TIMEOUT = 30  # seconds
 STEP_COST = 0.02  # per-step penalty to encourage efficiency
