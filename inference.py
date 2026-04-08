@@ -301,11 +301,24 @@ def compute_score(obs: Any) -> float:
     return min(max(score, 0.0001), 0.9099)
 
 
+TASKS = [
+    "task_easy_dff",
+    "task_easy_missing_semicolon",
+    "task_easy_mux",
+    "task_easy_syntax",
+    "task_hard_latch_inference",
+    "task_hard_seq_detector",
+    "task_medium_counter",
+    "task_medium_decoder",
+    "task_medium_logic_bug",
+    "task_medium_wrong_operator"
+]
+
 # ---------------------------------------------------------------------------
 # Main episode runner (Websockets ONLY)
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def run_task(task_name: str) -> None:
     # 1. Init OpenAI LLM client
     llm_client = openai.OpenAI(
         api_key=API_KEY,
@@ -329,13 +342,13 @@ def main() -> None:
     score = 0.0
     success = False
     
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
         # Reset via ws
         reset_payload: dict[str, Any] = {}
-        if TASK_NAME:
-            reset_payload["task_name"] = TASK_NAME
+        if task_name:
+            reset_payload["task_name"] = task_name
             
         reset_resp = ws_send("reset", reset_payload if reset_payload else None)
         obs = reset_resp.get("data", {})
@@ -402,6 +415,10 @@ def main() -> None:
     finally:
         ws.close()
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+def main() -> None:
+    for task_name in TASKS[:5]:  # Running just the first 5 tasks as requested
+        run_task(task_name)
 
 if __name__ == "__main__":
     main()
