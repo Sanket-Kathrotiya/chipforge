@@ -84,7 +84,7 @@ def log_step(
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -385,7 +385,7 @@ def run_task(task_name: str) -> None:
             if done:
                 success = True
                 score = sum(rewards)/len(rewards) if rewards else 0.0
-            score = min(max(score, 0.01), 0.99)
+            score = min(max(score, 0.001), 0.999)
             # Structured log (MANDATORY FORMAT)
             action_str = action_dict["action_type"]
             parts = []
