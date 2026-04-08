@@ -34,9 +34,9 @@ def eval_llm_submit(design_code: str, testbench_code: str, golden_code: str, tas
     Uses an LLM judge to evaluate the design and testbench against the goal.
     Returns a score between -1.0 and 1.0. 
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+
     if not api_key:
-        print("WARNING: OPENAI_API_KEY not found. Falling back to length-based heuristic.")
+        print("WARNING: API_KEY not found. Falling back to length-based heuristic.")
         return 0.5 if (len(design_code.strip()) > 10 and len(testbench_code.strip()) > 10) else -1.0
 
     client = openai.OpenAI(api_key=api_key , base_url=base_url)
@@ -66,6 +66,7 @@ def eval_llm_submit(design_code: str, testbench_code: str, golden_code: str, tas
         )
         score_str = response.choices[0].message.content.strip()
         score = float(score_str)
+        print(f"LLM Evaluation Score: {score}")
         return max(-1.0, min(1.0, score))
     except Exception as e:
         print(f"LLM Evaluation failed: {e}")

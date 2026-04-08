@@ -385,7 +385,7 @@ def run_task(task_name: str) -> None:
             if done:
                 success = True
                 score = sum(rewards)/len(rewards) if rewards else 0.0
-
+            score = min(max(score, 0.01), 0.99)
             # Structured log (MANDATORY FORMAT)
             action_str = action_dict["action_type"]
             parts = []
