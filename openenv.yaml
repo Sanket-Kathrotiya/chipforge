@@ -6,21 +6,17 @@ app: server.app:app
 port: 8000
 
 tasks:
-  - id: task_easy_syntax
-    difficulty: easy
-    description: Fix the syntax error in the full adder.
-    grader: chipforge.graders:chipforge_grader
   - id: task_easy_missing_semicolon
     difficulty: easy
     description: Fix the missing semicolon in a wire declaration in the full adder RTL.
     grader: chipforge.graders:chipforge_grader
-  - id: task_medium_logic_bug
-    difficulty: medium
-    description: Fix the logic error in the full adder. The sum computation uses the wrong operator.
-    grader: chipforge.graders:chipforge_grader
   - id: task_medium_wrong_operator
     difficulty: medium
     description: Fix the carry-out logic in the full adder. The cout uses the wrong Boolean operator.
+    grader: chipforge.graders:chipforge_grader
+  - id: task_medium_counter
+    difficulty: medium
+    description: Write a Verilog module for a 4-bit synchronous UP/DOWN counter with asynchronous active-high reset. Inputs are 'clk', 'rst', 'enable', 'up_down', and output is a 4-bit register 'count'. When 'rst' is high, the counter resets to 0. When 'enable' is high, it counts up if 'up_down' is 1, and down if 'up_down' is 0. If 'enable' is low, it holds its value. Don't forget to write a self-checking testbench covering reset, count up, count down, and enable low scenarios.
     grader: chipforge.graders:chipforge_grader
   - id: task_hard_latch_inference
     difficulty: hard
