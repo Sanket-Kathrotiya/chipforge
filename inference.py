@@ -290,7 +290,7 @@ def compute_score(obs: Any) -> float:
         lint = getattr(obs, "lint_status", "not_run")
 
     if sim in ("pass", "fail"):
-        score += 0.2
+        score += 0.1
     if sim == "pass":
         score += 0.3
     if synth == "pass":
@@ -298,7 +298,7 @@ def compute_score(obs: Any) -> float:
     if lint == "clean":
         score += 0.2
 
-    return min(max(score, 0.0001), 0.9099)
+    return min(max(score, 0.0001), 0.9999)
 
 
 TASKS = [
@@ -384,7 +384,7 @@ def run_task(task_name: str) -> None:
             
             if done:
                 success = True
-                score = compute_score(obs)
+                score = sum(rewards)/len(rewards) if rewards else 0.0
 
             # Structured log (MANDATORY FORMAT)
             action_str = action_dict["action_type"]
