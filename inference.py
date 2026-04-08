@@ -39,28 +39,26 @@ STDOUT FORMAT
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import textwrap
+import time
 from typing import Any, Dict, List, Optional
 
-from mistralai import Mistral
-from chipforge import ChipforgeAction, ChipforgeEnv
+import openai
+import websocket
 
 # ---------------------------------------------------------------------------
 # Environment configuration
 # ---------------------------------------------------------------------------
 
-IMAGE_NAME = os.getenv("IMAGE_NAME")  # Docker image name
-API_KEY = os.getenv("MISTRAL_API_KEY") or os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://api.mistral.ai/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "mistral-large-latest"
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "placeholder_key"
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 TASK_NAME = os.getenv("CHIPFORGE_TASK", "task_easy_syntax")
 BENCHMARK = os.getenv("CHIPFORGE_BENCHMARK", "chipforge")
-ENV_URL = os.getenv("ENV_URL")  # Optional: HF Space URL for direct connection
+ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")  # Optional: HF Space URL for direct connection
 MAX_STEPS = 20
 TEMPERATURE = 0.2
 MAX_TOKENS = 1024
@@ -69,10 +67,8 @@ MAX_TOKENS = 1024
 # Structured stdout logging (MANDATORY FORMAT)
 # ---------------------------------------------------------------------------
 
-
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
-
 
 def log_step(
     step: int, action: str, reward: float, done: bool, error: Optional[str]
@@ -84,7 +80,6 @@ def log_step(
         flush=True,
     )
 
-
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
@@ -92,6 +87,26 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         flush=True,
     )
 
+# ---------------------------------------------------------------------------
+# Action definitions
+# ---------------------------------------------------------------------------
+
+VALID_ACTIONS = [
+    "view_design",
+    "view_testbench",
+    "view_synthesis_log",
+    "view_lint_log",
+    "view_simulation_log",
+    "run_simulation",
+    "run_synthesis",
+    "run_lint",
+    "edit_line",
+    "append_line",
+    "insert_lines",
+    "replace_lines",
+    "write_file",
+    "submit",
+]
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -103,30 +118,33 @@ Your goal is to fix buggy Verilog RTL code so it passes simulation, synthesis, a
 
 Available actions (return exactly ONE JSON action per turn):
 
-1. view_testbench       — View the testbench code
-2. view_synthesis_log   — View synthesis tool logs from last run
-3. view_lint_log        — View lint tool logs from last run
-4. view_simulation_log  — View simulation tool logs from last run
-5. run_simulation       — Compile and simulate with Verilator
-6. run_synthesis        — Synthesize with Yosys
-7. run_lint             — Run Verilator lint checks
-8. edit_line            — Replace a single line. Requires line_number (1-indexed) and new_content
-9. append_line          — Append one RTL line. Requires new_content
-10. edit_testbench_line — Replace a single testbench line. Requires line_number and new_content
-11. append_testbench_line — Append one testbench line. Requires new_content
-12. submit              — Submit current RTL as final solution (triggers grading)
+1. view_design          — View the design (RTL) code
+2. view_testbench       — View the testbench code
+3. view_synthesis_log   — View synthesis tool logs from last run
+4. view_lint_log        — View lint tool logs from last run
+5. view_simulation_log  — View simulation tool logs from last run
+6. run_simulation       — Compile and simulate with Verilator
+7. run_synthesis        — Synthesize with Yosys
+8. run_lint             — Run Verilator lint checks
+9. edit_line            — Replace a single line in target file. Requires target ("design" or "testbench"), line_number (1-indexed) and new_content
+10. append_line          — Append one line to target file. Requires target and new_content
+11. insert_lines        — Insert multiple lines at line_number in target file. Requires target, line_number and new_content (newline separated)
+12. replace_lines       — Replace multiple lines in target file. Requires target, line_number, end_line_number (inclusive), and new_content
+13. write_file          — Write/overwrite the entire target file. Requires target and new_content (useful for tasks requiring generating code from scratch)
+14. submit              — Submit current RTL as final solution (triggers grading)
 
 Response format — return ONLY valid JSON:
-{"action_type": "...", "line_number": null, "new_content": null, "reasoning": "..."}
+{"action_type": "...", "target": null, "line_number": null, "end_line_number": null, "new_content": null, "reasoning": "..."}
 
 Strategy:
-1. The observation always includes the current RTL code — you don't need to view it separately
+1. Use view_design to inspect the current code if not in observation context
 2. Run run_simulation to see compilation/output errors
 3. If there are errors, use view_simulation_log to read error details
-4. Use edit_line to fix the bug (one line at a time)
-5. Re-run simulation to verify the fix
-6. Run synthesis and lint to ensure clean results
-7. Submit when everything passes
+4. Use edit_line / replace_lines to fix the bug
+5. Use append_line / insert_lines if a task starts with missing files
+6. Re-run simulation to verify the fix
+7. Run synthesis and lint to ensure clean results
+8. Submit when everything passes
 
 Rules:
 - Return valid JSON only, no markdown
@@ -135,15 +153,16 @@ Rules:
 - Minimize steps for a higher reward (step penalty of -0.02/step)
 """)
 
-
 # ---------------------------------------------------------------------------
-# LLM helpers (using OpenAI Client — MANDATORY)
+# LLM helpers
 # ---------------------------------------------------------------------------
-
 
 def build_prompt(obs: Dict[str, Any]) -> str:
     """Build user prompt from the current observation."""
     parts = ["Fix the RTL bug."]
+
+    if obs.get("task_description"):
+        parts.append(f"Task Description:\n{obs['task_description']}\n")
 
     parts.append(
         f"Step: {obs.get('step_count', '?')}/{obs.get('max_steps', 20)}"
@@ -165,7 +184,9 @@ def build_prompt(obs: Dict[str, Any]) -> str:
     )
     parts.append(status_line)
 
-    if obs.get("rtl_code"):
+    if obs.get("design_code"):
+        parts.append(f"\n--- RTL Code ---\n{obs['design_code']}")
+    elif obs.get("rtl_code"):
         parts.append(f"\n--- RTL Code ---\n{obs['rtl_code']}")
 
     if obs.get("testbench_code"):
@@ -207,23 +228,6 @@ def parse_action(text: str) -> Optional[Dict[str, Any]]:
 
     return None
 
-
-VALID_ACTIONS = [
-    "view_testbench",
-    "view_synthesis_log",
-    "view_lint_log",
-    "view_simulation_log",
-    "run_simulation",
-    "run_synthesis",
-    "run_lint",
-    "edit_line",
-    "append_line",
-    "edit_testbench_line",
-    "append_testbench_line",
-    "submit",
-]
-
-
 def validate_action(action: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize the parsed action."""
     action_type = action.get("action_type", "run_simulation")
@@ -232,118 +236,116 @@ def validate_action(action: Dict[str, Any]) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {"action_type": action_type}
 
-    if action_type in ("edit_line", "edit_testbench_line"):
+    if action_type in ("edit_line", "insert_lines"):
+        payload["target"] = action.get("target", "design")
         payload["line_number"] = action.get("line_number")
         payload["new_content"] = action.get("new_content")
-    elif action_type in ("append_line", "append_testbench_line"):
+    elif action_type == "replace_lines":
+        payload["target"] = action.get("target", "design")
+        payload["line_number"] = action.get("line_number")
+        payload["end_line_number"] = action.get("end_line_number")
+        payload["new_content"] = action.get("new_content")
+    elif action_type in ("append_line", "write_file"):
+        payload["target"] = action.get("target", "design")
         payload["new_content"] = action.get("new_content")
 
     return payload
 
-
-def call_llm(client: Mistral, prompt: str) -> str:
-    """Call the LLM using the Mistral Client."""
-    try:
-        completion = client.chat.complete(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-        )
-        text = (completion.choices[0].message.content or "").strip()
-        return text if text else '{"action_type": "run_simulation"}'
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        return '{"action_type": "run_simulation"}'
-
-
-def obs_to_dict(obs: Any) -> Dict[str, Any]:
-    """Convert a ChipforgeObservation to a dict for prompt building."""
-    return {
-        "rtl_code": getattr(obs, "rtl_code", ""),
-        "testbench_code": getattr(obs, "testbench_code", ""),
-        "log_output": getattr(obs, "log_output", ""),
-        "sim_status": getattr(obs, "sim_status", "not_run"),
-        "synth_status": getattr(obs, "synth_status", "not_run"),
-        "lint_status": getattr(obs, "lint_status", "not_run"),
-        "last_action": getattr(obs, "last_action", "reset"),
-        "action_result": getattr(obs, "action_result", ""),
-        "error_summary": getattr(obs, "error_summary", ""),
-        "task_description": getattr(obs, "task_description", ""),
-        "metadata": getattr(obs, "metadata", {}),
-        "step_count": getattr(obs, "step_count", 0),
-        "max_steps": getattr(obs, "max_steps", 20),
-    }
+def call_llm(client: openai.OpenAI, prompt: str) -> str:
+    """Call the LLM using the OpenAI Client."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = 5 * (attempt + 1)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def compute_score(obs: Any) -> float:
     """
     Compute a normalized score in [0, 1] from the final observation.
-
-    Score breakdown (matches the environment's quality potential):
-      +0.2  code compiles (sim != error)
-      +0.3  simulation passes
-      +0.3  synthesis clean
-      +0.2  lint clean
     """
     score = 0.0
-    sim = getattr(obs, "sim_status", "not_run")
-    synth = getattr(obs, "synth_status", "not_run")
-    lint = getattr(obs, "lint_status", "not_run")
+    if isinstance(obs, dict):
+        sim = obs.get("sim_status", "not_run")
+        synth = obs.get("synth_status", "not_run")
+        lint = obs.get("lint_status", "not_run")
+    else:
+        sim = getattr(obs, "sim_status", "not_run")
+        synth = getattr(obs, "synth_status", "not_run")
+        lint = getattr(obs, "lint_status", "not_run")
 
     if sim in ("pass", "fail"):
-        score += 0.2  # compiles
+        score += 0.2
     if sim == "pass":
-        score += 0.3  # simulation passes
+        score += 0.3
     if synth == "pass":
-        score += 0.3  # synthesis clean
+        score += 0.3
     if lint == "clean":
-        score += 0.2  # lint clean
+        score += 0.2
 
     return min(max(score, 0.0), 1.0)
 
 
 # ---------------------------------------------------------------------------
-# Main episode runner
+# Main episode runner (Websockets ONLY)
 # ---------------------------------------------------------------------------
 
+def main() -> None:
+    # 1. Init OpenAI LLM client
+    llm_client = openai.OpenAI(
+        api_key=API_KEY,
+        base_url=API_BASE_URL
+    )
 
-async def main() -> None:
-    llm_client = Mistral(api_key=API_KEY)
+    # 2. Connect via WebSocket for persistent session state
+    ws_url = ENV_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+    ws = websocket.create_connection(ws_url, timeout=120)
 
-    # Connect to environment
-    if IMAGE_NAME:
-        env = await ChipforgeEnv.from_docker_image(IMAGE_NAME)
-    elif ENV_URL:
-        env = ChipforgeEnv(base_url=ENV_URL)
-    else:
-        raise RuntimeError(
-            "Set IMAGE_NAME (for Docker) or ENV_URL (for HF Space) to connect to the environment."
-        )
+    def ws_send(msg_type: str, data: dict = None) -> dict:
+        """Send a WebSocket message and return the response."""
+        payload = {"type": msg_type}
+        if data is not None:
+            payload["data"] = data
+        ws.send(json.dumps(payload))
+        return json.loads(ws.recv())
 
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
-    final_obs = None
-
+    
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = await env.reset(task_name=TASK_NAME)
-        obs = result.observation
-        final_obs = obs
-
+        # Reset via ws
+        reset_payload: dict[str, Any] = {}
+        if TASK_NAME:
+            reset_payload["task_name"] = TASK_NAME
+            
+        reset_resp = ws_send("reset", reset_payload if reset_payload else None)
+        obs = reset_resp.get("data", {})
+        
         for step in range(1, MAX_STEPS + 1):
-            if result.done:
+            if obs.get("done", False):
+                success = True # Assume true if it naturally exited early
                 break
 
             # Build prompt and query LLM
-            obs_dict = obs_to_dict(obs)
-            prompt = build_prompt(obs_dict)
+            prompt = build_prompt(obs)
             raw_response = call_llm(llm_client, prompt)
 
             # Parse and validate action
@@ -353,49 +355,52 @@ async def main() -> None:
 
             action_dict = validate_action(parsed)
 
-            # Step the environment
-            action = ChipforgeAction(**action_dict)
-            result = await env.step(action)
-            obs = result.observation
-            final_obs = obs
-
-            reward = result.reward or 0.0
-            done = result.done
-            error = getattr(obs, "error_summary", None)
+            # Step the environment via Websocket
+            step_resp = ws_send("step", action_dict)
+            obs = step_resp.get("data", {}).get("observation", step_resp.get("data", {}))
+            reward = float(step_resp.get("data", {}).get("reward", 0.0))
+            done = step_resp.get("data", {}).get("done", False)
+            
+            error = obs.get("error_summary", None)
             if error == "":
                 error = None
 
             rewards.append(reward)
             steps_taken = step
+            
+            if done:
+                success = True
+                score = compute_score(obs)
 
-            # Structured log (MANDATORY)
+            # Structured log (MANDATORY FORMAT)
             action_str = action_dict["action_type"]
-            if action_dict["action_type"] in ("edit_line", "edit_testbench_line"):
-                action_str += f"({action_dict.get('line_number', '?')})"
+            parts = []
+            if "line_number" in action_dict and action_dict["line_number"]:
+                parts.append(str(action_dict["line_number"]))
+            if "end_line_number" in action_dict and action_dict["end_line_number"]:
+                parts.append(str(action_dict["end_line_number"]))
+            
+            if parts:
+                action_str += f"({'-'.join(parts)})"
 
             log_step(
-                step=step,
+                step=steps_taken,
                 action=action_str,
                 reward=reward,
                 done=done,
                 error=error,
             )
-
+            
             if done:
                 break
 
-        # Compute score from final observation tool statuses
-        if final_obs is not None:
-            score = compute_score(final_obs)
-        success = score >= 0.5
-
+    except Exception as e:
+        success = False
+        import traceback
+        traceback.print_exc()
     finally:
-        try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
+        ws.close()
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

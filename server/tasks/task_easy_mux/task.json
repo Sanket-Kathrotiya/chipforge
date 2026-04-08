@@ -1,0 +1,6 @@
+{
+    "name": "task_easy_generate_mux",
+    "difficulty": "easy",
+    "task_type": "generate_from_scratch",
+    "description": "Write a Verilog module for a 2-to-1 Multiplexer with inputs 'a', 'b', 'sel' and output 'y'. If 'sel' is 0, 'y' should output 'a'. If 'sel' is 1, 'y' should output 'b'. You must also write a standard testbench that tests all 8 possible input combinations and calls $finish."
+}

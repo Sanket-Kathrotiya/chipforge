@@ -29,19 +29,17 @@ try:
     env = ChipforgeEnv.from_docker_image("chipforge-env:latest")
 
     # Start a new episode (loads a random buggy RTL task)
-    # RTL code is always included in the observation (Markov state)
     result = env.reset()
     print(f"Task: {result.observation.task_description}")
-    print(result.observation.rtl_code)  # always present
+
+    # View the buggy RTL
+    result = env.step(ChipforgeAction(action_type="view_rtl"))
+    print(result.observation.rtl_code)
 
     # Run simulation to see errors
     result = env.step(ChipforgeAction(action_type="run_simulation"))
     print(f"Status: {result.observation.sim_status}")
     print(f"Error: {result.observation.error_summary}")
-
-    # View the simulation log for details
-    result = env.step(ChipforgeAction(action_type="view_simulation_log"))
-    print(result.observation.log_output)
 
     # Fix the bug
     result = env.step(ChipforgeAction(
@@ -54,9 +52,9 @@ try:
     result = env.step(ChipforgeAction(action_type="run_simulation"))
     print(f"Status: {result.observation.sim_status}")
 
-    # Submit solution (re-runs all tools and grades)
+    # Submit solution
     result = env.step(ChipforgeAction(action_type="submit"))
-    print(f"Reward: {result.reward}")
+    print(f"Reward: {result.observation.reward}")
 
 finally:
     env.close()
@@ -66,38 +64,34 @@ finally:
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
+| `view_design` | — | View current RTL code with line numbers |
 | `view_testbench` | — | View the testbench code |
-| `view_simulation_log` | — | View simulation log from last run |
-| `view_synthesis_log` | — | View synthesis log from last run |
-| `view_lint_log` | — | View lint log from last run |
+| `view_simulation_log` | — | View output from last simulation run |
+| `view_synthesis_log` | — | View output from last synthesis run |
+| `view_lint_log` | — | View output from last lint run |
 | `run_simulation` | — | Compile + simulate with Verilator |
 | `run_synthesis` | — | Synthesize with Yosys |
 | `run_lint` | — | Run Verilator lint checks |
-| `edit_line` | `line_number`, `new_content` | Replace a single line of RTL |
-| `append_line` | `new_content` | Append one new RTL line |
-| `edit_testbench_line` | `line_number`, `new_content` | Replace a single testbench line |
-| `append_testbench_line` | `new_content` | Append one new testbench line |
+| `edit_line` | `target`, `line_number`, `new_content` | Replace a single line in target ("design" / "testbench") |
+| `append_line` | `target`, `new_content` | Append a single line to target ("design" / "testbench") |
+| `insert_lines` | `target`, `line_number`, `new_content` | Insert multiple lines at target ("design" / "testbench") |
+| `replace_lines` | `target`, `line_number`, `end_line_number`, `new_content` | Replace multiple lines in target ("design" / "testbench") |
 | `submit` | — | Submit fix and get final reward |
-
-> **Note:** RTL code is always included in the observation — no separate `view_rtl` action is needed.
 
 ## Observation Space
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `rtl_code` | str | Current RTL with line numbers (always present) |
+| `rtl_code` | str | Current RTL (always populated) |
 | `testbench_code` | str | Testbench (populated by `view_testbench`) |
-| `log_output` | str | Tool output (populated by `view_*_log` or tool runs) |
+| `log_output` | str | Tool output (populated by `view_*_log`) |
 | `sim_status` | str | `not_run` / `pass` / `fail` / `error` |
 | `synth_status` | str | `not_run` / `pass` / `warning` / `error` |
 | `lint_status` | str | `not_run` / `clean` / `warning` / `error` |
-| `error_summary` | str | One-line diagnostic summary |
+| `error_summary` | str | One-line error hint |
 | `task_description` | str | Description of the current task |
-| `last_action` | str | The action that produced this observation |
-| `action_result` | str | Human-readable result of the last action |
 | `step_count` | int | Steps taken so far |
 | `max_steps` | int | Maximum allowed steps (20) |
-| `cumulative_reward` | float | Total quality score so far (0.0–1.0) |
 
 ## Reward
 
@@ -168,11 +162,11 @@ chipforge/
 
 ```
 reset()  →  Task: "Fix the syntax error in the full adder RTL"
-             (observation always includes rtl_code with line numbers)
+
+view_rtl  →  see buggy code with line numbers
 run_simulation  →  sim_status="error", error_summary="syntax error near '^'"
 edit_line(13, "assign sum = x1 ^ cin;")  →  "Line 13 updated"
 run_simulation  →  sim_status="pass"
 run_synthesis  →  synth_status="pass"
-run_lint       →  lint_status="clean"
 submit  →  reward=0.93
 ```

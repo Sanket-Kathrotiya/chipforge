@@ -1,0 +1,6 @@
+{
+    "name": "task_hard_generate_fsm",
+    "difficulty": "hard",
+    "task_type": "generate_from_scratch",
+    "description": "Design a Mealy sequence detector FSM in Verilog that detects the overlapping sequence '1011'. The module should use a system clock 'clk', active-low asynchronous reset 'rst_n', a single-bit serial input 'x', and an output 'y'. The output 'y' should be high ONLY when the sequence '1011' has been detected in the input stream. You must design a robust testbench that drives '1011' multiple times, including overlapping instances (like '1011011'), and verify against an expected count of sequence matches, printing the final results. Keep the design self-contained within 50 lines max."
+}

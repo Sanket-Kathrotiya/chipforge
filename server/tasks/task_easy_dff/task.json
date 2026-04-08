@@ -1,0 +1,6 @@
+{
+    "name": "task_easy_generate_dff",
+    "difficulty": "easy",
+    "task_type": "generate_from_scratch",
+    "description": "Write a structural Verilog module for a standard D Flip-Flop with inputs 'clk', 'd', and output 'q'. The D Flip-Flop should copy 'd' to 'q' on the positive edge of 'clk'. Then write a simple testbench to generate a clock, feed 4 different data values, and assert that the output updates correctly on the clock edge."
+}

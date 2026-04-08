@@ -1,0 +1,6 @@
+{
+    "name": "task_medium_generate_counter",
+    "difficulty": "medium",
+    "task_type": "generate_from_scratch",
+    "description": "Write a Verilog module for a 4-bit synchronous UP/DOWN counter with asynchronous active-high reset. Inputs are 'clk', 'rst', 'enable', 'up_down', and output is a 4-bit register 'count'. When 'rst' is high, the counter resets to 0. When 'enable' is high, it counts up if 'up_down' is 1, and down if 'up_down' is 0. If 'enable' is low, it holds its value. Don't forget to write a self-checking testbench covering reset, count up, count down, and enable low scenarios."
+}

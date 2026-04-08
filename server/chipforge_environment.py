@@ -5,24 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-ChipForge RTL Debugging Environment — RL-optimized.
+ChipForge Design Environment — RL-optimized.
+This environment trains autonomous agents to write, debug, and optimize Verilog (RTL) code.
+The tasks range from fixing subtle logic bugs in existing code to generating complete designs and testbenches from scratch.
 
-Key RL design decisions:
+Key RL Design Decisions:
   1. OBSERVATION is a self-contained Markov state:
-     - RTL code always included (agent never wastes steps viewing)
-     - All tool statuses always present
-     - Action result feedback at every step
+     - Design code is always included (the agent never wastes steps viewing files).
+     - Tool statuses are continuously available.
+     - Every step provides immediate action result feedback.
 
-  2. REWARD uses potential-based shaping (Andrew Ng's theorem):
-     - per_step_reward = new_potential - old_potential - step_cost
-     - Potential = quality score based on tool statuses (0.0 to 1.0)
-     - Gives dense learning signal without changing optimal policy
-     - Terminal bonus on submit
+    2. REWARD is a discrete history-based step reward mapping into [0, 1]:
+       - Passing tools gives positive rewards (0.3 on 1st try, 0.2 on 2nd, 0.1 later).
+       - Failing tools penalizes the RL state (-0.5).
+       - Running tools on already-passed unmodified code penalizes (-0.05).
+       - General actions carry a fixed negative step cost.
+       - A mock LLM judge rewards the final submission.
 
-  3. STATUS is NOT reset on edit:
-     - Prevents reward hacking (edit → artificially drop potential → re-run → gain)
-     - Agent must re-run tools to confirm fix worked
-     - On submit, all stale tools are automatically re-run
+  3. STATUS is explicitly NOT reset upon code edits:
+     - Prevents reward hacking (e.g., editing just to force score modifications).
+     - Forces the agent to re-run tools to verify that its modifications worked.
+     - On submit, all tools are automatically re-run on the latest code to prevent stale state submissions.
 """
 
 import json
@@ -38,103 +41,23 @@ from uuid import uuid4
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
+from .constants import (
+    LOG_TRUNCATE,
+    MAX_STEPS,
+    STEP_COST,
+    TASKS_DIR,
+    TOOL_TIMEOUT,
+    VALID_ACTIONS,
+    VERILATOR,
+    YOSYS,
+)
+from .reward import eval_tool_reward, eval_llm_submit, normalize_reward
+from .utils import categorize_tasks, discover_tasks, extract_error_summary, run_tool
+
 try:
     from ..models import ChipforgeAction, ChipforgeObservation
 except ImportError:
     from models import ChipforgeAction, ChipforgeObservation
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-MAX_STEPS = 20
-LOG_TRUNCATE = 2000  # max chars in observation logs
-TOOL_TIMEOUT = 30  # seconds
-STEP_COST = 0.02  # per-step penalty to encourage efficiency
-
-# Tool paths — absolute for OSS CAD Suite in Docker
-VERILATOR = os.environ.get("VERILATOR_PATH", "/opt/oss-cad-suite/bin/verilator")
-YOSYS = os.environ.get("YOSYS_PATH", "/opt/oss-cad-suite/bin/yosys")
-
-VALID_ACTIONS = {
-    "view_testbench",
-    "view_synthesis_log",
-    "view_lint_log",
-    "view_simulation_log",
-    "run_simulation",
-    "run_synthesis",
-    "run_lint",
-    "edit_line",
-    "append_line",
-    "edit_testbench_line",
-    "append_testbench_line",
-    "submit",
-}
-
-TASKS_DIR = Path(__file__).parent / "tasks"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _discover_tasks() -> List[Path]:
-    """Return sorted list of task directories under TASKS_DIR (recursive)."""
-    if not TASKS_DIR.is_dir():
-        return []
-    return sorted(
-        p.parent
-        for p in TASKS_DIR.rglob("task.json")
-        if p.is_file() and p.parent.is_dir()
-    )
-
-
-def _run_tool(cmd: List[str], cwd: str, timeout: int = TOOL_TIMEOUT) -> Dict[str, Any]:
-    """Run a shell command and return stdout, stderr, returncode."""
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout}s",
-            "returncode": -1,
-        }
-    except FileNotFoundError as e:
-        return {
-            "stdout": "",
-            "stderr": f"Tool not found: {e}",
-            "returncode": -1,
-        }
-
-
-def _extract_error_summary(stderr: str, stdout: str = "") -> str:
-    """Extract a one-line error summary from tool output."""
-    combined = stderr + "\n" + stdout
-    for line in combined.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        lower = line.lower()
-        if any(kw in lower for kw in ("error", "syntax", "warning", "latch", "fail")):
-            return line[:200]
-    for line in stderr.splitlines():
-        line = line.strip()
-        if line:
-            return line[:200]
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -146,25 +69,29 @@ class ChipforgeEnvironment(Environment):
     """
     RTL Debugging Environment for RL training.
 
-    Quality potential (φ) breakdown:
-      +0.2  code compiles (no syntax errors)
-      +0.3  simulation output matches expected
-      +0.3  synthesis clean (no warnings/errors)
-      +0.2  lint clean
+    Reward calculation uses a discrete, history-based mapping:
+      +0.3  tool sequence passed (1st attempt)
+      +0.2  tool sequence passed (2nd attempt)
+      +0.1  tool sequence passed (3+ attempts)
+      -0.5  tool sequence failed
+      -0.05 re-running already successful tools
 
-    Per-step reward = φ(s') - φ(s) - step_cost
-    Terminal bonus on submit = +0.1 if all pass, -0.2 if premature
+    Step rewards are evaluated, reduced by fixed step cost, and normalized to [0, 1].
     """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = False
 
     def __init__(self) -> None:
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._tasks = _discover_tasks()
+        self._tasks = discover_tasks()
         self._rng = random.Random()
+        self._episode_num = 0
+
+        # Categorize tasks
+        self._categorized_tasks = categorize_tasks(self._tasks)
 
         # Episode state
-        self._rtl_lines: List[str] = []
+        self._design_lines: List[str] = []
         self._testbench_code: str = ""
         self._task_meta: Dict[str, Any] = {}
         self._golden_code: str = ""
@@ -191,44 +118,19 @@ class ChipforgeEnvironment(Environment):
 
         # Episode signals
         self._done: bool = False
-        self._potential: float = 0.0  # current quality potential
         self._cumulative_reward: float = 0.0  # sum of per-step rewards
 
+        # Tool attempt states
+        self._sim_attempts: int = 0
+        self._synth_attempts: int = 0
+        self._lint_attempts: int = 0
+
     # -----------------------------------------------------------------------
-    # Potential-based reward
+    # Utils
     # -----------------------------------------------------------------------
-
-    def _compute_potential(self) -> float:
-        """
-        Quality potential φ(s) based on current tool statuses.
-        Range: [0.0, 1.0]. Only counts tools that have been run.
-        """
-        phi = 0.0
-
-        sim_fresh = self._sim_validated_hash == self._code_hash
-        synth_fresh = self._synth_validated_hash == self._code_hash
-        lint_fresh = self._lint_validated_hash == self._code_hash
-
-        # +0.2 if code compiles (sim ran and didn't error) on current code
-        if sim_fresh and self._sim_status in ("pass", "fail"):
-            phi += 0.2
-
-        # +0.3 if simulation passes on current code
-        if sim_fresh and self._sim_status == "pass":
-            phi += 0.3
-
-        # +0.3 if synthesis is clean on current code
-        if synth_fresh and self._synth_status == "pass":
-            phi += 0.3
-
-        # +0.2 if lint is clean on current code
-        if lint_fresh and self._lint_status == "clean":
-            phi += 0.2
-
-        return phi
 
     def _current_code_hash(self) -> str:
-        return str(hash("\n".join(self._rtl_lines)))
+        return str(hash("\n".join(self._design_lines) + "\n" + self._testbench_code))
 
     # -----------------------------------------------------------------------
     # OpenEnv Interface
@@ -252,6 +154,9 @@ class ChipforgeEnvironment(Environment):
         if not self._tasks:
             raise RuntimeError(f"No tasks found in {TASKS_DIR}")
 
+        # Increment episode count
+        self._episode_num += 1
+
         # Pick task
         task_name = kwargs.get("task_name")
         if task_name:
@@ -259,7 +164,22 @@ class ChipforgeEnvironment(Environment):
             if not task_dir.is_dir():
                 raise ValueError(f"Task not found: {task_name}")
         else:
-            task_dir = self._rng.choice(self._tasks)
+            # Curriculum learning: probabilistically pick difficulty based on episode
+            if self._episode_num <= 20:
+                weights = {"easy": 0.8, "medium": 0.2, "hard": 0.0}
+            elif self._episode_num <= 50:
+                weights = {"easy": 0.4, "medium": 0.5, "hard": 0.1}
+            else:
+                weights = {"easy": 0.2, "medium": 0.4, "hard": 0.4}
+
+            choices = ["easy", "medium", "hard"]
+            probs = [weights[c] for c in choices]
+            
+            chosen_diff = self._rng.choices(choices, weights=probs, k=1)[0]
+            if not self._categorized_tasks.get(chosen_diff):
+                task_dir = self._rng.choice(self._tasks)
+            else:
+                task_dir = self._rng.choice(self._categorized_tasks[chosen_diff])
 
         # Load files
         with open(task_dir / "task.json") as f:
@@ -268,9 +188,9 @@ class ChipforgeEnvironment(Environment):
         design_buggy = task_dir / "design_buggy.v"
         if design_buggy.is_file():
             with open(design_buggy) as f:
-                self._rtl_lines = f.read().splitlines()
+                self._design_lines = f.read().splitlines()
         else:
-            self._rtl_lines = []
+            self._design_lines = []
 
         testbench = task_dir / "testbench.v"
         if testbench.is_file():
@@ -304,8 +224,10 @@ class ChipforgeEnvironment(Environment):
         self._synth_validated_hash = ""
         self._lint_validated_hash = ""
         self._done = False
-        self._potential = 0.0
         self._cumulative_reward = 0.0
+        self._sim_attempts = 0
+        self._synth_attempts = 0
+        self._lint_attempts = 0
 
         # Fresh workdir
         self._workdir = tempfile.mkdtemp(prefix="chipforge_")
@@ -342,14 +264,16 @@ class ChipforgeEnvironment(Environment):
                 step_reward=-STEP_COST,
             )
 
-        # Snapshot potential BEFORE action
-        old_potential = self._potential
-
         # Dispatch action
         obs_extras: Dict[str, Any] = {}
         action_result = ""
+        raw_reward = 0.0
 
-        if action_type == "view_testbench":
+        if action_type == "view_design":
+            # RTL code is returned by default in ChipforgeObservation
+            action_result = f"Design loaded ({len(self._design_lines)} lines)."
+
+        elif action_type == "view_testbench":
             obs_extras["testbench_code"] = self._testbench_code
             action_result = f"Testbench loaded ({self._testbench_code.count(chr(10))+1} lines)."
 
@@ -366,50 +290,73 @@ class ChipforgeEnvironment(Environment):
             action_result = f"Viewing simulation log ({len(self._sim_log)} chars)."
 
         elif action_type == "run_simulation":
-            self._do_simulation(timeout=timeout)
-            obs_extras["log_output"] = self._sim_log[:LOG_TRUNCATE]
-            action_result = f"Simulation: {self._sim_status}. {self._error_summary}"
+            sim_fresh = (self._sim_validated_hash == self._code_hash)
+            if sim_fresh and self._sim_status == "pass":
+                raw_reward = -0.05
+                action_result = f"Simulation already passed for this code. (-0.05 reward)"
+                obs_extras["log_output"] = self._sim_log[:LOG_TRUNCATE]
+            else:
+                self._sim_attempts += 1
+                self._do_simulation(timeout=timeout)
+                raw_reward = eval_tool_reward(self._sim_status, self._sim_attempts)
+                obs_extras["log_output"] = self._sim_log[:LOG_TRUNCATE]
+                action_result = f"Simulation: {self._sim_status}. {self._error_summary}"
 
         elif action_type == "run_synthesis":
-            self._do_synthesis(timeout=timeout)
-            obs_extras["log_output"] = self._synth_log[:LOG_TRUNCATE]
-            action_result = f"Synthesis: {self._synth_status}. {self._error_summary}"
+            synth_fresh = (self._synth_validated_hash == self._code_hash)
+            if synth_fresh and self._synth_status == "pass":
+                raw_reward = -0.05
+                action_result = f"Synthesis already passed for this code. (-0.05 reward)"
+                obs_extras["log_output"] = self._synth_log[:LOG_TRUNCATE]
+            else:
+                self._synth_attempts += 1
+                self._do_synthesis(timeout=timeout)
+                raw_reward = eval_tool_reward(self._synth_status, self._synth_attempts)
+                obs_extras["log_output"] = self._synth_log[:LOG_TRUNCATE]
+                action_result = f"Synthesis: {self._synth_status}. {self._error_summary}"
 
         elif action_type == "run_lint":
-            self._do_lint(timeout=timeout)
-            obs_extras["log_output"] = self._lint_log[:LOG_TRUNCATE]
-            action_result = f"Lint: {self._lint_status}. {self._error_summary}"
+            lint_fresh = (self._lint_validated_hash == self._code_hash)
+            if lint_fresh and self._lint_status == "clean":
+                raw_reward = -0.05
+                action_result = f"Lint already clean for this code. (-0.05 reward)"
+                obs_extras["log_output"] = self._lint_log[:LOG_TRUNCATE]
+            else:
+                self._lint_attempts += 1
+                self._do_lint(timeout=timeout)
+                raw_reward = eval_tool_reward(self._lint_status, self._lint_attempts)
+                obs_extras["log_output"] = self._lint_log[:LOG_TRUNCATE]
+                action_result = f"Lint: {self._lint_status}. {self._error_summary}"
 
         elif action_type == "edit_line":
-            action_result = self._do_edit(action.line_number, action.new_content)
+            action_result = self._do_edit(action.target, action.line_number, action.new_content)
 
         elif action_type == "append_line":
-            action_result = self._do_append(action.new_content)
+            action_result = self._do_append(action.target, action.new_content)
+            
+        elif action_type == "insert_lines":
+            action_result = self._do_insert_lines(action.target, action.line_number, action.new_content)
+            
+        elif action_type == "replace_lines":
+            action_result = self._do_replace_lines(action.target, action.line_number, action.end_line_number, action.new_content)
 
-        elif action_type == "edit_testbench_line":
-            action_result = self._do_edit_testbench(action.line_number, action.new_content)
-
-        elif action_type == "append_testbench_line":
-            action_result = self._do_append_testbench(action.new_content)
+        elif action_type == "write_file":
+            action_result = self._do_write_file(action.target, action.new_content)
 
         elif action_type == "submit":
             action_result = self._do_submit(timeout=timeout)
+            raw_reward = eval_llm_submit(
+                design_code="\n".join(self._design_lines),
+                testbench_code=self._testbench_code,
+                golden_code=self._golden_code,
+                task_desc=self._task_meta.get("description", "")
+            )
 
-        # Compute new potential
-        new_potential = self._compute_potential()
-        self._potential = new_potential
+        # Base step cost is universally applied to raw logic
+        raw_reward -= STEP_COST
 
-        # Per-step reward = potential delta - step cost + terminal bonus
-        step_reward = (new_potential - old_potential) - STEP_COST
-
-        # Terminal bonus/penalty on submit
-        if action_type == "submit":
-            if new_potential >= 1.0:
-                step_reward += 0.1  # bonus for perfect fix
-            elif new_potential >= 0.5:
-                step_reward += 0.0  # partial fix, no bonus
-            else:
-                step_reward -= 0.2  # premature submit penalty
+        # Normalize logic maps [-1.0, 1.0] to [0.0, 1.0] if requested, explicitly leaving boundaries intact
+        step_reward = normalize_reward(raw_reward)
 
         self._cumulative_reward += step_reward
 
@@ -439,7 +386,7 @@ class ChipforgeEnvironment(Environment):
             self._error_summary = "No working directory."
             return
 
-        if not self._rtl_lines:
+        if not self._design_lines:
             self._sim_status = "error"
             self._sim_log = "No RTL design present. Build design first."
             self._error_summary = "No RTL design present. Add lines with append_line."
@@ -459,7 +406,7 @@ class ChipforgeEnvironment(Environment):
         design_path = os.path.join(self._workdir, "design.v")
         tb_path = os.path.join(self._workdir, "testbench.v")
         with open(design_path, "w") as f:
-            f.write("\n".join(self._rtl_lines) + "\n")
+            f.write("\n".join(self._design_lines) + "\n")
         with open(tb_path, "w") as f:
             f.write(self._testbench_code)
 
@@ -469,7 +416,7 @@ class ChipforgeEnvironment(Environment):
             shutil.rmtree(obj_dir, ignore_errors=True)
 
         # Compile
-        compile_result = _run_tool(
+        compile_result = run_tool(
             [
                 VERILATOR,
                 "--prefix", "Vsim",
@@ -493,7 +440,7 @@ class ChipforgeEnvironment(Environment):
                 + compile_result["stderr"] + "\n"
                 + compile_result["stdout"]
             )
-            self._error_summary = _extract_error_summary(
+            self._error_summary = extract_error_summary(
                 compile_result["stderr"], compile_result["stdout"]
             )
             self._code_dirty = False
@@ -508,7 +455,7 @@ class ChipforgeEnvironment(Environment):
             self._error_summary = "Simulation binary not found."
             return
 
-        run_result = _run_tool([sim_binary], cwd=self._workdir, timeout=timeout)
+        run_result = run_tool([sim_binary], cwd=self._workdir, timeout=timeout)
         self._sim_log = run_result["stdout"] + run_result["stderr"]
         self._code_dirty = False
         self._sim_validated_hash = self._code_hash
@@ -541,7 +488,7 @@ class ChipforgeEnvironment(Environment):
 
         design_path = os.path.join(self._workdir, "design.v")
         with open(design_path, "w") as f:
-            f.write("\n".join(self._rtl_lines) + "\n")
+            f.write("\n".join(self._design_lines) + "\n")
 
         yosys_script = (
             "read_verilog design.v; "
@@ -550,7 +497,7 @@ class ChipforgeEnvironment(Environment):
             "write_verilog synth_out.v"
         )
 
-        result = _run_tool(
+        result = run_tool(
             [YOSYS, "-p", yosys_script],
             cwd=self._workdir,
             timeout=timeout,
@@ -562,7 +509,7 @@ class ChipforgeEnvironment(Environment):
 
         if result["returncode"] != 0:
             self._synth_status = "error"
-            self._error_summary = _extract_error_summary(
+            self._error_summary = extract_error_summary(
                 result["stderr"], result["stdout"]
             )
             self._synth_validated_hash = self._code_hash
@@ -573,7 +520,7 @@ class ChipforgeEnvironment(Environment):
 
             if has_warning:
                 self._synth_status = "warning"
-                self._error_summary = _extract_error_summary(
+                self._error_summary = extract_error_summary(
                     result["stderr"], result["stdout"]
                 ) or "Synthesis completed with warnings."
             else:
@@ -589,9 +536,9 @@ class ChipforgeEnvironment(Environment):
 
         design_path = os.path.join(self._workdir, "design.v")
         with open(design_path, "w") as f:
-            f.write("\n".join(self._rtl_lines) + "\n")
+            f.write("\n".join(self._design_lines) + "\n")
 
-        result = _run_tool(
+        result = run_tool(
             [VERILATOR, "--lint-only", "design.v"],
             cwd=self._workdir,
             timeout=timeout,
@@ -604,14 +551,14 @@ class ChipforgeEnvironment(Environment):
         if result["returncode"] != 0:
             lower = lint_output.lower()
             self._lint_status = "error" if "error" in lower else "warning"
-            self._error_summary = _extract_error_summary(
+            self._error_summary = extract_error_summary(
                 result["stderr"], result["stdout"]
             )
             self._lint_validated_hash = self._code_hash
         else:
             if "warning" in lint_output.lower():
                 self._lint_status = "warning"
-                self._error_summary = _extract_error_summary(
+                self._error_summary = extract_error_summary(
                     result["stderr"], result["stdout"]
                 )
             else:
@@ -619,90 +566,143 @@ class ChipforgeEnvironment(Environment):
                 self._error_summary = "Lint clean."
             self._lint_validated_hash = self._code_hash
 
-    def _do_edit(self, line_number: Optional[int], new_content: Optional[str]) -> str:
+    def _do_edit(self, target: str, line_number: Optional[int], new_content: Optional[str]) -> str:
         """Edit a single line. Returns action_result string."""
         if line_number is None or new_content is None:
             self._error_summary = "edit_line requires line_number and new_content."
             return self._error_summary
 
-        if line_number < 1 or line_number > len(self._rtl_lines):
+        lines = self._design_lines if target == "design" else self._testbench_code.splitlines()
+
+        if line_number < 1 or line_number > len(lines):
             self._error_summary = (
-                f"Invalid line_number {line_number}. "
-                f"Valid range: 1–{len(self._rtl_lines)}."
+                f"Invalid line_number {line_number} for {target}. "
+                f"Valid range: 1–{len(lines)}."
             )
             return self._error_summary
 
-        old_line = self._rtl_lines[line_number - 1]
-        self._rtl_lines[line_number - 1] = new_content
+        old_line = lines[line_number - 1]
+        lines[line_number - 1] = new_content
+        
+        if target == "design":
+            self._design_lines = lines
+        else:
+            self._testbench_code = "\n".join(lines) + "\n"
+            
         self._code_dirty = True
         self._code_hash = self._current_code_hash()
 
         result = (
-            f"Line {line_number} updated. "
+            f"[{target}] Line {line_number} updated. "
             f"Old: '{old_line.strip()}' → New: '{new_content.strip()}'"
         )
         self._error_summary = result
 
         # NOTE: We do NOT reset tool statuses here.
-        # This is intentional for RL — the potential stays the same
-        # after edit, so reward delta = -step_cost. The agent must
-        # re-run tools to measure the impact of the edit.
+        # This forces the agent to re-run tools to measure the impact of the edit and
+        # avoids breaking the episode logic.
         return result
 
-    def _do_append(self, new_content: Optional[str]) -> str:
-        """Append a single RTL line."""
+    def _do_append(self, target: str, new_content: Optional[str]) -> str:
+        """Append a single line."""
         if new_content is None:
             self._error_summary = "append_line requires new_content."
             return self._error_summary
 
-        self._rtl_lines.append(new_content)
+        lines = self._design_lines if target == "design" else self._testbench_code.splitlines()
+        lines.append(new_content)
+        
+        if target == "design":
+            self._design_lines = lines
+        else:
+            self._testbench_code = "\n".join(lines) + "\n"
+            
         self._code_dirty = True
         self._code_hash = self._current_code_hash()
-        result = f"RTL line appended at {len(self._rtl_lines)}."
+        result = f"[{target}] line appended at {len(lines)}."
         self._error_summary = result
         return result
 
-    def _do_edit_testbench(self, line_number: Optional[int], new_content: Optional[str]) -> str:
-        """Edit a single line in testbench.v."""
+    def _do_insert_lines(self, target: str, line_number: Optional[int], new_content: Optional[str]) -> str:
+        """Insert multiple lines starting at line_number."""
         if line_number is None or new_content is None:
-            self._error_summary = (
-                "edit_testbench_line requires line_number and new_content."
-            )
+            self._error_summary = "insert_lines requires line_number and new_content."
             return self._error_summary
 
-        tb_lines = self._testbench_code.splitlines()
-        if line_number < 1 or line_number > len(tb_lines):
+        lines = self._design_lines if target == "design" else self._testbench_code.splitlines()
+
+        if line_number < 1 or line_number > len(lines) + 1:
             self._error_summary = (
-                f"Invalid testbench line_number {line_number}. "
-                f"Valid range: 1–{len(tb_lines)}."
+                f"Invalid line_number {line_number} for {target}. "
+                f"Valid range: 1–{len(lines) + 1}."
             )
             return self._error_summary
-
-        old_line = tb_lines[line_number - 1]
-        tb_lines[line_number - 1] = new_content
-        self._testbench_code = "\n".join(tb_lines) + "\n"
+        
+        insert_idx = line_number - 1
+        lines_to_add = new_content.splitlines()
+        lines[insert_idx:insert_idx] = lines_to_add
+        
+        if target == "design":
+            self._design_lines = lines
+        else:
+            self._testbench_code = "\n".join(lines) + "\n"
+            
         self._code_dirty = True
         self._code_hash = self._current_code_hash()
-
-        result = (
-            f"Testbench line {line_number} updated. "
-            f"Old: '{old_line.strip()}' → New: '{new_content.strip()}'"
-        )
+        
+        result = f"[{target}] Inserted {len(lines_to_add)} lines at line {line_number}."
         self._error_summary = result
         return result
 
-    def _do_append_testbench(self, new_content: Optional[str]) -> str:
-        """Append one line to testbench.v."""
-        if new_content is None:
-            self._error_summary = "append_testbench_line requires new_content."
+    def _do_replace_lines(self, target: str, line_number: Optional[int], end_line_number: Optional[int], new_content: Optional[str]) -> str:
+        """Replace lines from line_number to end_line_number (inclusive) with new_content."""
+        if line_number is None or end_line_number is None or new_content is None:
+            self._error_summary = "replace_lines requires line_number, end_line_number, and new_content."
             return self._error_summary
 
-        tb_lines = self._testbench_code.splitlines()
-        tb_lines.append(new_content)
-        self._testbench_code = "\n".join(tb_lines) + "\n"
+        lines = self._design_lines if target == "design" else self._testbench_code.splitlines()
+
+        if line_number < 1 or end_line_number > len(lines) or line_number > end_line_number:
+            self._error_summary = (
+                f"Invalid line range {line_number} to {end_line_number} for {target}. "
+                f"Valid range: 1–{len(lines)}."
+            )
+            return self._error_summary
+
+        start_idx = line_number - 1
+        end_idx = end_line_number
+        lines_to_add = new_content.splitlines()
+        
+        lines[start_idx:end_idx] = lines_to_add
+
+        if target == "design":
+            self._design_lines = lines
+        else:
+            self._testbench_code = "\n".join(lines) + "\n"
+            
         self._code_dirty = True
         self._code_hash = self._current_code_hash()
-        result = f"Testbench line appended at {len(tb_lines)}."
+        
+        result = f"[{target}] Replaced {end_line_number - line_number + 1} lines (lines {line_number}-{end_line_number}) with {len(lines_to_add)} new lines."
+        self._error_summary = result
+        return result
+
+    def _do_write_file(self, target: str, new_content: Optional[str]) -> str:
+        """Write the entire file with new_content."""
+        if new_content is None:
+            self._error_summary = "write_file requires new_content."
+            return self._error_summary
+
+        lines = new_content.splitlines()
+        if target == "design":
+            self._design_lines = lines
+        else:
+            self._testbench_code = "\n".join(lines) + "\n"
+            
+        self._code_dirty = True
+        self._code_hash = self._current_code_hash()
+        
+        result = f"[{target}] Wrote entire file ({len(lines)} lines)."
         self._error_summary = result
         return result
 
@@ -724,11 +724,11 @@ class ChipforgeEnvironment(Environment):
     # Observation builder
     # -----------------------------------------------------------------------
 
-    def _numbered_rtl(self) -> str:
+    def _numbered_design(self) -> str:
         """Return RTL code with line numbers."""
-        if not self._rtl_lines:
+        if not self._design_lines:
             return "  1: // RTL is currently empty. Use append_line to create it."
-        return "\n".join(f"{i:3d}: {line}" for i, line in enumerate(self._rtl_lines, 1))
+        return "\n".join(f"{i:3d}: {line}" for i, line in enumerate(self._design_lines, 1))
 
     def _make_obs(
         self,
@@ -740,7 +740,7 @@ class ChipforgeEnvironment(Environment):
         """Build a self-contained observation."""
         return ChipforgeObservation(
             # Always included — the Markov state
-            rtl_code=self._numbered_rtl(),
+            design_code=self._numbered_design(),
             sim_status=self._sim_status,
             synth_status=self._synth_status,
             lint_status=self._lint_status,
@@ -764,7 +764,7 @@ class ChipforgeEnvironment(Environment):
             metadata={
                 "task_mode": self._task_meta.get("task_type", "debug_rtl"),
                 "missing_files": {
-                    "design_buggy.v": not bool(self._rtl_lines),
+                    "design_buggy.v": not bool(self._design_lines),
                     "testbench.v": not bool(self._testbench_code.strip()),
                     "design_golden.v": not bool(self._golden_code.strip()),
                 },

@@ -1,0 +1,6 @@
+{
+    "name": "task_medium_generate_decoder",
+    "difficulty": "medium",
+    "task_type": "generate_from_scratch",
+    "description": "Design a 3-to-8 line decoder structural module with an active-low enable input. Inputs are a 3-bit vector 'in' and a 1-bit 'en_n'. Output is an 8-bit vector 'out'. Only one bit of 'out' should be active (1) corresponding to the binary value of 'in', but only if 'en_n' is 0. If 'en_n' is 1, all outputs must be 0. Write a rigorous self-checking testbench to verify the decoder for all 16 possible input vectors and print 'SIMULATION PASSED' if everything matches."
+}
