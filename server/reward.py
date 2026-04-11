@@ -81,5 +81,5 @@ def normalize_reward(raw_reward: float) -> float:
     Theoretical limits: raw [-1.0, 1.0] -> normalized [0.0, 1.0]
     """
     mapped = (raw_reward + 1.0) / 2.0
-    return max(0.0, min(1.0, mapped))
+    return max(0.010, min(0.990, mapped))
     # return raw_reward  # For now, we return the raw reward directly and let the inference script handle scaling

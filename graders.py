@@ -17,4 +17,4 @@ def chipforge_grader(trajectory: dict = None) -> float:
     normalized = (total + 0.5) / 1.5
     
     # Ensure it's bounded strictly between (0, 1)
-    return min(max(round(normalized, 4), 0.01), 0.99)
+    return max(0.010, min(0.990, round(normalized, 4)))

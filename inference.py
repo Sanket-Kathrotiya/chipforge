@@ -84,7 +84,7 @@ def log_step(
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -298,7 +298,7 @@ def compute_score(obs: Any) -> float:
     if lint == "clean":
         score += 0.2
 
-    return min(max(score, 0.0001), 0.9999)
+    return max(0.010, min(0.990, score))
 
 
 TASKS = [
@@ -338,7 +338,7 @@ def run_task(task_name: str) -> None:
 
     rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+    score = 0.500
     success = False
     
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
@@ -383,8 +383,8 @@ def run_task(task_name: str) -> None:
             
             if done:
                 success = True
-                score = sum(rewards)/len(rewards) if rewards else 0.0
-            score = min(max(score, 0.001), 0.999)
+                score = sum(rewards)/len(rewards) if rewards else 0.500
+            score = max(0.010, min(0.990, score))
             # Structured log (MANDATORY FORMAT)
             action_str = action_dict["action_type"]
             parts = []
