@@ -47,7 +47,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 import openai
-import websocket
+from client import ChipforgeEnv
+from models import ChipforgeAction
 from dotenv import load_dotenv
 load_dotenv()
 # ---------------------------------------------------------------------------
@@ -324,18 +325,6 @@ def run_task(task_name: str) -> None:
         base_url=API_BASE_URL
     )
 
-    # 2. Connect via WebSocket for persistent session state
-    ws_url = ENV_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
-    ws = websocket.create_connection(ws_url, timeout=120)
-
-    def ws_send(msg_type: str, data: dict = None) -> dict:
-        """Send a WebSocket message and return the response."""
-        payload = {"type": msg_type}
-        if data is not None:
-            payload["data"] = data
-        ws.send(json.dumps(payload))
-        return json.loads(ws.recv())
-
     rewards: List[float] = []
     steps_taken = 0
     score = 0.500
@@ -344,75 +333,74 @@ def run_task(task_name: str) -> None:
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        # Reset via ws
-        reset_payload: dict[str, Any] = {}
-        if task_name:
-            reset_payload["task_name"] = task_name
+        with ChipforgeEnv(base_url=ENV_URL).sync() as env_client:
+            # Reset via env_client
+            reset_resp = env_client.reset(task_name=task_name)
+            obs = reset_resp.observation.model_dump()
             
-        reset_resp = ws_send("reset", reset_payload if reset_payload else None)
-        obs = reset_resp.get("data", {})
-        
-        for step in range(1, MAX_STEPS + 1):
-            if obs.get("done", False):
-                success = True # Assume true if it naturally exited early
-                break
+            for step in range(1, MAX_STEPS + 1):
+                if obs.get("done", False):
+                    success = True # Assume true if it naturally exited early
+                    break
 
-            # Build prompt and query LLM
-            prompt = build_prompt(obs)
-            raw_response = call_llm(llm_client, prompt)
+                # Build prompt and query LLM
+                prompt = build_prompt(obs)
+                raw_response = call_llm(llm_client, prompt)
 
-            # Parse and validate action
-            parsed = parse_action(raw_response)
-            if parsed is None:
-                parsed = {"action_type": "run_simulation"}
+                # Parse and validate action
+                parsed = parse_action(raw_response)
+                if parsed is None:
+                    parsed = {"action_type": "run_simulation"}
 
-            action_dict = validate_action(parsed)
+                action_dict = validate_action(parsed)
+                action_obj = ChipforgeAction(**action_dict)
 
-            # Step the environment via Websocket
-            step_resp = ws_send("step", action_dict)
-            obs = step_resp.get("data", {}).get("observation", step_resp.get("data", {}))
-            reward = float(step_resp.get("data", {}).get("reward", 0.0))
-            done = step_resp.get("data", {}).get("done", False)
-            
-            error = obs.get("error_summary", None)
-            if error == "":
-                error = None
+                # Step the environment via env_client
+                step_resp = env_client.step(action_obj)
+                obs_obj = step_resp.observation
+                obs = obs_obj.model_dump()
+                
+                reward = float(step_resp.reward or 0.0)
+                done = step_resp.done
+                
+                error = obs.get("error_summary", None)
+                if error == "":
+                    error = None
 
-            rewards.append(reward)
-            steps_taken = step
-            
-            if done:
-                success = True
-                score = sum(rewards)/len(rewards) if rewards else 0.500
-            score = max(0.010, min(0.990, score))
-            # Structured log (MANDATORY FORMAT)
-            action_str = action_dict["action_type"]
-            parts = []
-            if "line_number" in action_dict and action_dict["line_number"]:
-                parts.append(str(action_dict["line_number"]))
-            if "end_line_number" in action_dict and action_dict["end_line_number"]:
-                parts.append(str(action_dict["end_line_number"]))
-            
-            if parts:
-                action_str += f"({'-'.join(parts)})"
+                rewards.append(reward)
+                steps_taken = step
+                
+                if done:
+                    success = True
+                    score = sum(rewards)/len(rewards) if rewards else 0.500
+                score = max(0.010, min(0.990, score))
+                # Structured log (MANDATORY FORMAT)
+                action_str = action_dict["action_type"]
+                parts = []
+                if "line_number" in action_dict and action_dict["line_number"]:
+                    parts.append(str(action_dict["line_number"]))
+                if "end_line_number" in action_dict and action_dict["end_line_number"]:
+                    parts.append(str(action_dict["end_line_number"]))
+                
+                if parts:
+                    action_str += f"({'-'.join(parts)})"
 
-            log_step(
-                step=steps_taken,
-                action=action_str,
-                reward=reward,
-                done=done,
-                error=error,
-            )
-            
-            if done:
-                break
+                log_step(
+                    step=steps_taken,
+                    action=action_str,
+                    reward=reward,
+                    done=done,
+                    error=error,
+                )
+                
+                if done:
+                    break
 
     except Exception as e:
         success = False
         import traceback
         traceback.print_exc()
     finally:
-        ws.close()
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 def main() -> None:

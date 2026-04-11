@@ -12,7 +12,10 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import ChipforgeAction, ChipforgeObservation
+try:
+    from .models import ChipforgeAction, ChipforgeObservation
+except ImportError:
+    from models import ChipforgeAction, ChipforgeObservation
 
 
 class ChipforgeEnv(
@@ -67,8 +70,12 @@ class ChipforgeEnv(
         """
         payload = {"action_type": action.action_type}
 
+        if action.target is not None:
+            payload["target"] = action.target
         if action.line_number is not None:
             payload["line_number"] = action.line_number
+        if action.end_line_number is not None:
+            payload["end_line_number"] = action.end_line_number
         if action.new_content is not None:
             payload["new_content"] = action.new_content
         return payload
@@ -85,7 +92,7 @@ class ChipforgeEnv(
         """
         obs_data = payload.get("observation", {})
         observation = ChipforgeObservation(
-            rtl_code=obs_data.get("rtl_code", ""),
+            design_code=obs_data.get("design_code", ""),
             testbench_code=obs_data.get("testbench_code", ""),
             log_output=obs_data.get("log_output", ""),
             sim_status=obs_data.get("sim_status", "not_run"),
@@ -93,8 +100,11 @@ class ChipforgeEnv(
             lint_status=obs_data.get("lint_status", "not_run"),
             error_summary=obs_data.get("error_summary", ""),
             task_description=obs_data.get("task_description", ""),
+            last_action=obs_data.get("last_action", ""),
+            action_result=obs_data.get("action_result", ""),
             step_count=obs_data.get("step_count", 0),
             max_steps=obs_data.get("max_steps", 20),
+            cumulative_reward=obs_data.get("cumulative_reward", 0.0),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),
